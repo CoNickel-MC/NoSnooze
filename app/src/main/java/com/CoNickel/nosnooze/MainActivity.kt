@@ -4,7 +4,6 @@ import android.app.KeyguardManager
 import android.app.TimePickerDialog
 import android.content.Context
 import android.content.Intent
-import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.net.Uri
@@ -19,7 +18,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.CoNickel.nosnooze.ui.theme.NoSnoozeTheme
 import java.util.Calendar
 import java.util.Locale
@@ -30,11 +31,13 @@ class MainActivity : ComponentActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private val stopAlarmRunnable = Runnable { 
         isRingingGlobal.value = false
+        isChallengeGlobal.value = true
         stopRinging()
     }
 
     companion object {
         val isRingingGlobal = mutableStateOf(false)
+        val isChallengeGlobal = mutableStateOf(false)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,16 +49,27 @@ class MainActivity : ComponentActivity() {
         setContent {
             NoSnoozeTheme {
                 val isRinging by isRingingGlobal
+                val isChallenge by isChallengeGlobal
                 
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    if (isRinging) {
-                        AlarmRingingScreen(onSnooze = {
-                            isRingingGlobal.value = false
-                            stopRinging()
-                        })
-                    } else {
-                        Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                            AlarmScreen(modifier = Modifier.padding(innerPadding))
+                    when {
+                        isRinging -> {
+                            AlarmRingingScreen(onSnooze = {
+                                isRingingGlobal.value = false
+                                isChallengeGlobal.value = true
+
+                            })
+                        }
+                        isChallenge -> {
+                            MathChallengeScreen(onSolved = {
+                                isChallengeGlobal.value = false
+                                stopRinging()
+                            })
+                        }
+                        else -> {
+                            Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                                AlarmScreen(modifier = Modifier.padding(innerPadding))
+                            }
                         }
                     }
                 }
@@ -71,8 +85,8 @@ class MainActivity : ComponentActivity() {
     private fun handleIntent(intent: Intent?) {
         if (intent?.getBooleanExtra("RINGING", false) == true) {
             isRingingGlobal.value = true
+            isChallengeGlobal.value = false
             
-            // Wake up and show over lock screen
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                 setShowWhenLocked(true)
                 setTurnScreenOn(true)
@@ -93,9 +107,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startRinging() {
-        stopRinging() // Clean up existing if any
-
-        // Play Sound
+        stopRinging()
         val alarmUri: Uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
         ringtone = RingtoneManager.getRingtone(this, alarmUri)
@@ -104,7 +116,6 @@ class MainActivity : ComponentActivity() {
         }
         ringtone?.play()
 
-        // Vibrate
         vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 500), 0))
@@ -113,7 +124,6 @@ class MainActivity : ComponentActivity() {
             vibrator?.vibrate(longArrayOf(0, 500, 500), 0)
         }
 
-        // Auto-stop after 2 minutes
         handler.postDelayed(stopAlarmRunnable, 120000)
     }
 
@@ -143,7 +153,50 @@ fun AlarmRingingScreen(onSnooze: () -> Unit) {
             modifier = Modifier.fillMaxWidth().height(80.dp),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
         ) {
-            Text("SNOOZE / STOP", style = MaterialTheme.typography.headlineMedium)
+            Text("SNOOZE", style = MaterialTheme.typography.headlineMedium)
+        }
+    }
+}
+
+@Composable
+fun MathChallengeScreen(onSolved: () -> Unit) {
+    val context = LocalContext.current
+    val alarmScheduler = remember { AlarmScheduler(context) }
+    var problem by remember { mutableStateOf(alarmScheduler.generateProblem()) }
+    var answerText by remember { mutableStateOf("") }
+    
+    Column(
+        modifier = Modifier.fillMaxSize().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text("Solve to stop the alarm!", style = MaterialTheme.typography.headlineMedium)
+        Spacer(modifier = Modifier.height(32.dp))
+        Text(problem, style = MaterialTheme.typography.displayLarge, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(32.dp))
+        
+        OutlinedTextField(
+            value = answerText,
+            onValueChange = { answerText = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Answer") }
+        )
+        
+        Spacer(modifier = Modifier.height(32.dp))
+        
+        Button(
+            onClick = {
+                if (alarmScheduler.verifyAnswer(answerText)) {
+                    val onTime = alarmScheduler.isBeforeDeadline()
+                    alarmScheduler.processChallengeResult(onTime)
+                    onSolved()
+                } else {
+                    answerText = ""
+                }
+            },
+            modifier = Modifier.fillMaxWidth().height(56.dp)
+        ) {
+            Text("Submit")
         }
     }
 }
@@ -153,16 +206,15 @@ fun AlarmRingingScreen(onSnooze: () -> Unit) {
 fun AlarmScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val alarmScheduler = remember { AlarmScheduler(context) }
-
-    var startTime by remember { mutableStateOf(Calendar.getInstance().apply {
-        set(Calendar.HOUR_OF_DAY, 8)
-        set(Calendar.MINUTE, 0)
-    }) }
     
-    var endTime by remember { mutableStateOf(Calendar.getInstance().apply {
-        set(Calendar.HOUR_OF_DAY, 9)
-        set(Calendar.MINUTE, 0)
-    }) }
+    // Check for missed deadline every time the screen is opened
+    LaunchedEffect(Unit) {
+        alarmScheduler.checkMissedDeadline()
+    }
+
+    var startTime by remember { mutableStateOf(Calendar.getInstance()) }
+    
+    var endTime by remember { mutableStateOf(Calendar.getInstance().apply { add(Calendar.HOUR, 1) }) }
 
     var showDialog1 by remember { mutableStateOf(false) }
     var showDialog2 by remember { mutableStateOf(false) }
@@ -173,8 +225,19 @@ fun AlarmScreen(modifier: Modifier = Modifier) {
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
         Text("NoSnooze", style = MaterialTheme.typography.displayMedium)
+        
+        // Streak display
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Current Streak", style = MaterialTheme.typography.labelLarge)
+                Text("${alarmScheduler.getStreak()} Days", style = MaterialTheme.typography.displayMedium, color = MaterialTheme.colorScheme.primary)
+            }
+        }
 
-        Spacer(modifier = Modifier.height(40.dp))
+        Spacer(modifier = Modifier.height(20.dp))
 
         TimeButton("Alarm Time", startTime) { showDialog1 = true }
         TimeButton("Later Bound", endTime) { showDialog2 = true }
